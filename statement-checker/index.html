@@ -25,7 +25,7 @@
  <h1>Does your converted bank statement actually add up?</h1>
  <p class="lead">Converted a statement PDF to CSV with Acrobat, Xero's converter, csv2qbo or anything else? Check it before importing. This page checks every running balance to the cent, confirms opening balance plus transactions equals the closing balance, and flags rows that may be imported twice. The file never leaves your computer; the page makes no network requests.</p>
  <p><label>Opening balance (optional) <input id="open" type="text" inputmode="decimal" placeholder="e.g. 3,197.81"></label><label>Closing balance (optional) <input id="close" type="text" inputmode="decimal" placeholder="e.g. -7,343.58"></label></p>
- <p class="note">Leave them blank if the CSV has a Balance column; they are inferred. Without a Balance column, enter both from the statement.</p>
+ <p class="note">Enter both from the statement for full proof. Left blank, the checker can only check the rows in the file against each other.</p>
  <div id="drop" tabindex="0" role="button" aria-label="Choose a CSV file">Drop a statement CSV here, or click to choose one<input id="file" type="file" accept=".csv,text/csv" hidden></div>
  <p><button id="s1">Try a CSV that adds up</button><button id="s2">Try one with a one-cent conversion error</button></p>
  <div id="out" class="panel" hidden></div>
@@ -38,7 +38,7 @@
  * equal closing, and likely double-imported rows are flagged. Pure (no I/O): browser and Node. */
 (function (root, factory) { if (typeof module === 'object' && module.exports) module.exports = factory(); else root.StatementCheck = factory(); })(this, function () {
   'use strict';
-  function parseCSV(text) { const rows = []; let row = [], cell = '', q = false, i = 0; const s = String(text).replace(/^﻿/, '');
+  function parseCSV(text) { const rows = []; let row = [], cell = '', q = false, i = 0; const s = String(text).replace(/^\uFEFF/, '');
     for (; i < s.length; i++) { const c = s[i];
       if (q) { if (c === '"') { if (s[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += c; }
       else if (c === '"') q = true; else if (c === ',') { row.push(cell); cell = ''; }
@@ -90,17 +90,25 @@
     const list = order === 'newest first' ? [...tx].reverse() : tx, sum = tx.reduce((s, t) => s + t.amount, 0);
     let opening = opts.opening !== undefined && String(opts.opening).trim() !== '' ? cents(opts.opening) : null, closing = opts.closing !== undefined && String(opts.closing).trim() !== '' ? cents(opts.closing) : null;
     if (Number.isNaN(opening) || Number.isNaN(closing)) throw new Error('BAD_BALANCE_INPUT: opening and closing balances must be numbers like 1,234.56');
+    // Balances typed from the statement are independent evidence. Balances inferred from the file's own first/last rows are not:
+    // checking the file against itself cannot detect rows missing at the start or end (FORENSIC UIP-5), so they never yield RECONCILES.
     const inferredOpening = order && list.length ? list[0].balance - list[0].amount : null, inferredClosing = order && list.length ? list[list.length - 1].balance : null;
-    if (opening === null && inferredOpening !== null) opening = inferredOpening; if (closing === null && inferredClosing !== null) closing = inferredClosing;
-    let totals = null; if (opening !== null && closing !== null) { totals = opening + sum === closing; if (!totals) problems.push({ line: null, issue: 'TOTALS_DO_NOT_RECONCILE', detail: money(opening) + ' + ' + money(sum) + ' = ' + money(opening + sum) + ', statement says ' + money(closing) }); }
-    else warnings.push('Opening and closing balances are unknown, so the overall total was not checked.');
+    const openingGiven = opening !== null, closingGiven = closing !== null;
+    let totals = null;
+    if (openingGiven && closingGiven) { totals = opening + sum === closing; if (!totals) problems.push({ line: null, issue: 'TOTALS_DO_NOT_RECONCILE', detail: money(opening) + ' + ' + money(sum) + ' = ' + money(opening + sum) + ', statement says ' + money(closing) }); }
+    else {
+      if (openingGiven && inferredOpening !== null && opening !== inferredOpening) problems.push({ line: null, issue: 'OPENING_MISMATCH', detail: 'statement opening ' + money(opening) + ' but the first row implies ' + money(inferredOpening) + ' (rows missing at the start?)' });
+      if (closingGiven && inferredClosing !== null && closing !== inferredClosing) problems.push({ line: null, issue: 'CLOSING_MISMATCH', detail: 'statement closing ' + money(closing) + ' but the last row shows ' + money(inferredClosing) + ' (rows missing at the end?)' });
+      warnings.push('Enter the opening and closing balance printed on the statement to prove no rows are missing at the start or end; without them only the rows in the file can be checked against each other.');
+    }
+    if (opening === null) opening = inferredOpening; if (closing === null) closing = inferredClosing;
     // Possible double import: same date, amount and description more than once (warn; real repeats exist, e.g. two identical coffees).
     const seen = new Map(); for (const t of tx) { const k = t.date + '|' + t.amount + '|' + t.description.toLowerCase(); seen.set(k, [...(seen.get(k) || []), t.line]); }
     const dupes = [...seen.values()].filter(v => v.length > 1);
     if (dupes.length) warnings.push(dupes.length + ' group(s) of identical rows (same date, description and amount), lines ' + dupes.map(d => d.join('/')).join(', ') + ': check these were not imported twice.');
     return { rows: tx.length, columns: Object.keys(cols), row_order: order, running_balances_checked: !!order, opening: opening === null ? null : money(opening), closing: closing === null ? null : money(closing),
       net_change: money(sum), total_in: money(tx.filter(t => t.amount > 0).reduce((s, t) => s + t.amount, 0)), total_out: money(-tx.filter(t => t.amount < 0).reduce((s, t) => s + t.amount, 0)),
-      totals_reconcile: totals, verdict: problems.length ? 'DOES_NOT_RECONCILE' : (order || totals) ? 'RECONCILES' : 'NOT_ENOUGH_INFORMATION', problems, warnings }; }
+      totals_reconcile: totals, verdict: problems.length ? 'DOES_NOT_RECONCILE' : totals ? 'RECONCILES' : order ? 'RUNNING_BALANCES_CONSISTENT' : 'NOT_ENOUGH_INFORMATION', balances_source: openingGiven && closingGiven ? 'STATEMENT' : 'INFERRED_FROM_FILE', problems, warnings }; }
   return { check, parseCSV, cents };
 });
 </script>
@@ -109,17 +117,17 @@
  const $=id=>document.getElementById(id),out=$('out'),esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
  const GOOD='Date,Description,Amount,Balance\n03/01/2025,BALANCE FORWARD ADJ,0.00,1000.00\n03/02/2025,COFFEE BAR,-4.50,995.50\n03/03/2025,CLIENT PAYMENT BLUE FERN,1250.00,2245.50\n03/04/2025,CITY WATER UTILITY,-82.17,2163.33\n03/05/2025,RENT PAYMENT GATEWAY PROPERTY,-1400.00,763.33\n';
  const BAD=GOOD.replace('2163.33','2163.34').replace('763.33','763.34');
- const NAMES={RUNNING_BALANCE_BREAK:'running balance does not follow from the previous row and this amount',TOTALS_DO_NOT_RECONCILE:'opening + transactions does not equal closing',AMOUNT_NOT_A_NUMBER:'amount is not a number',BALANCE_NOT_A_NUMBER:'balance is not a number',DATE_NOT_RECOGNISED:'date not recognised',BOTH_DEBIT_AND_CREDIT:'both a debit and a credit on one row'};
+ const NAMES={OPENING_MISMATCH:'opening balance does not match the first row',CLOSING_MISMATCH:'closing balance does not match the last row',RUNNING_BALANCE_BREAK:'running balance does not follow from the previous row and this amount',TOTALS_DO_NOT_RECONCILE:'opening + transactions does not equal closing',AMOUNT_NOT_A_NUMBER:'amount is not a number',BALANCE_NOT_A_NUMBER:'balance is not a number',DATE_NOT_RECOGNISED:'date not recognised',BOTH_DEBIT_AND_CREDIT:'both a debit and a credit on one row'};
  function show(name,text){out.hidden=false;let r;try{r=StatementCheck.check(text,{opening:$('open').value,closing:$('close').value});}
   catch(e){out.innerHTML='<p class="bad"><strong>'+esc(name)+':</strong> '+esc(e.message)+'</p>';document.title='Statement CSV Checker: ERROR';return null;}
-  const v=r.verdict==='RECONCILES'?'<p class="ok"><strong>'+esc(name)+' reconciles.</strong> '+(r.running_balances_checked?'Every running balance checked to the cent ('+esc(r.row_order)+').':'Overall total checked.')+'</p>':r.verdict==='DOES_NOT_RECONCILE'?'<p class="bad"><strong>'+esc(name)+' does not reconcile.</strong> Fix these before importing:</p>':'<p class="warn"><strong>Not enough information to prove it.</strong> Add a Balance column, or enter the opening and closing balance.</p>';
+  const v=r.verdict==='RECONCILES'?'<p class="ok"><strong>'+esc(name)+' reconciles with the statement.</strong> '+(r.running_balances_checked?'Every running balance checked to the cent ('+esc(r.row_order)+'), and opening plus transactions equals the closing balance you entered.':'Opening plus transactions equals the closing balance you entered.')+'</p>':r.verdict==='RUNNING_BALANCES_CONSISTENT'?'<p class="warn"><strong>'+esc(name)+': every running balance is consistent to the cent ('+esc(r.row_order)+').</strong> To prove no rows are missing at the start or end, enter the opening and closing balance printed on the statement.</p>':r.verdict==='DOES_NOT_RECONCILE'?'<p class="bad"><strong>'+esc(name)+' does not reconcile.</strong> Fix these before importing:</p>':'<p class="warn"><strong>Not enough information to prove it.</strong> Add a Balance column, or enter the opening and closing balance.</p>';
   out.innerHTML=v+(r.problems.length?'<ul>'+r.problems.slice(0,25).map(p=>'<li>'+(p.line?'Line '+p.line+': ':'')+esc(NAMES[p.issue]||p.issue)+(p.value!==undefined?' ('+esc(p.value)+')':'')+(p.detail?': '+esc(p.detail):'')+'</li>').join('')+'</ul>':'')+
    '<p class="note">'+r.rows+' rows · in '+esc(r.total_in)+' · out '+esc(r.total_out)+' · opening '+esc(r.opening??'unknown')+' · closing '+esc(r.closing??'unknown')+'</p>'+(r.warnings.length?'<ul class="note">'+r.warnings.map(w=>'<li>'+esc(w)+'</li>').join('')+'</ul>':'');return r;}
  function handle(f){if(!f)return;if(f.size>50*1024*1024){out.hidden=false;out.innerHTML='<p class="bad">File too large (limit 50 MB).</p>';return;}const fr=new FileReader();fr.onload=()=>show(f.name,fr.result);fr.readAsText(f);}
  $('s1').onclick=()=>{$('open').value='';$('close').value='';show('sample.csv',GOOD);};$('s2').onclick=()=>{$('open').value='';$('close').value='';show('sample-with-error.csv',BAD);};
  const drop=$('drop'),input=$('file');drop.onclick=()=>input.click();drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')input.click();};input.onchange=()=>handle(input.files[0]);
  drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};drop.ondragleave=()=>drop.classList.remove('over');drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');handle(e.dataTransfer.files[0]);};
- if(location.hash==='#selftest'){const a=show('sample.csv',GOOD),b=show('sample-with-error.csv',BAD);document.title=a&&b&&a.verdict==='RECONCILES'&&b.verdict==='DOES_NOT_RECONCILE'&&b.problems[0].line===5?'SELFTEST PASS '+a.rows:'SELFTEST FAIL';}
+ if(location.hash==='#selftest'){const a=show('sample.csv',GOOD),b=show('sample-with-error.csv',BAD);document.title=a&&b&&a.verdict==='RUNNING_BALANCES_CONSISTENT'&&b.verdict==='DOES_NOT_RECONCILE'&&b.problems[0].line===5?'SELFTEST PASS '+a.rows:'SELFTEST FAIL';}
 })();
 </script>
 </body>
