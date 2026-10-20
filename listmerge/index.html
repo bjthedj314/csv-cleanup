@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ListMerge</title>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'">
+<style>
+ :root { --bg:#0f0c1a; --panel:#1b1630; --ink:#f4f1ff; --soft:#bdb6d6; --gold:#f5c45a; --line:#2c2546; --bad:#ff8a80; --ok:#7ee0a3; }
+ @media (prefers-color-scheme: light) { :root { --bg:#faf8ff; --panel:#fff; --ink:#18142a; --soft:#56506b; --gold:#9a6a00; --line:#e4dff2; --bad:#b3261e; --ok:#1e7a46; } }
+ * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+ main { max-width:860px; margin:0 auto; padding:40px 16px 64px; }
+ h1 { font-size:clamp(26px,5vw,40px); margin:4px 0 8px; } .eyebrow { color:var(--gold); font-weight:600; letter-spacing:.08em; text-transform:uppercase; font-size:13px; }
+ .lead { color:var(--soft); max-width:640px; } .panel { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 22px; margin-top:18px; }
+ #drop { border:2px dashed var(--line); border-radius:14px; padding:36px 16px; text-align:center; cursor:pointer; margin-top:20px; }
+ #drop.over { border-color:var(--gold); } button, .btn { font:inherit; background:var(--gold); color:#1a1300; border:0; border-radius:10px; padding:9px 14px; font-weight:600; cursor:pointer; margin:4px 6px 4px 0; }
+ .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; } .stat b { display:block; font-size:24px; } .stat span { color:var(--soft); font-size:13px; }
+ .err { color:var(--bad); } .ok { color:var(--ok); } table { width:100%; border-collapse:collapse; font-size:14px; } td, th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); }
+ .note { color:var(--soft); font-size:14px; } code { font-size:13px; }
+</style>
+</head>
+<body>
+<main>
+ <div class="eyebrow">ListMerge</div>
+ <h1>One row per real person, with every merge explained.</h1>
+ <p class="lead">ListMerge de-duplicates contact exports entirely in the browser: no upload, no account, no network requests. Below, it runs on a built-in synthetic sample so you can see exactly what it produces.</p>
+ <p class="note">This public demo runs only on the built-in synthetic sample. For your own list, order the done-for-you cleanup below; a standalone ListMerge download is not on sale yet.</p>
+ <p><button id="sample">Try the built-in sample (synthetic data)</button></p>
+ <div id="status" class="panel" hidden></div>
+ <div class="panel">
+  <strong>How records are merged</strong>
+  <ul class="note">
+   <li>Same email (case and spacing ignored), or the same Gmail inbox written differently (dots, <code>+tags</code>).</li>
+   <li>Same phone <em>and</em> the same name, ignoring accents. A name alone never merges two records.</li>
+   <li>If two different people share one address (for example <code>info@</code>), those rows go to the review list instead of being merged.</li>
+   <li>Every input row ends up in exactly one place: a contact, the merge log or the exceptions list.</li>
+  </ul>
+ </div>
+<p><a class="btn" href="https://contra.com/s/gg6b772W-csv-and-excel-data-cleanup-validation-and-exception-reporting">Get your contact list cleaned: $199 on Contra</a></p>
+</main>
+<script>
+/* ListMerge engine: private, in-browser contact-list de-duplication with an evidence merge log.
+ * A faithful port of fulfillment/csv-cleanup-service/contact_resolution.py (benchmarked: 1.0 vs a generic-AI proxy 0.832);
+ * parity with the Python engine is proven on held-out benchmark seeds (proof/parity.json). Runs in the browser or Node; no
+ * network, no storage: the buyer's file never leaves their machine. */
+(function (root, factory) { if (typeof module === 'object' && module.exports) module.exports = factory(); else root.ListMerge = factory(); })(this, function () {
+  'use strict';
+  const COLUMNS = ['Name', 'Email', 'Phone', 'Company', 'Signup Date', 'State', 'Amount'];
+  const STATES = { alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA', colorado: 'CO', connecticut: 'CT', delaware: 'DE', florida: 'FL', georgia: 'GA', hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA', kansas: 'KS', kentucky: 'KY', louisiana: 'LA', maine: 'ME', maryland: 'MD', massachusetts: 'MA', michigan: 'MI', minnesota: 'MN', mississippi: 'MS', missouri: 'MO', montana: 'MT', nebraska: 'NE', nevada: 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', ohio: 'OH', oklahoma: 'OK', oregon: 'OR', pennsylvania: 'PA', 'rhode island': 'RI', 'south carolina': 'SC', 'south dakota': 'SD', tennessee: 'TN', texas: 'TX', utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA', 'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY', 'district of columbia': 'DC' };
+  const CODES = new Set(Object.values(STATES));
+  const NUM = /^-?\d+(\.\d+)?$/;
+  const CHECKS = { Email: /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/, Phone: /^\+1\d{10}$/, 'Signup Date': /^\d{4}-\d{2}-\d{2}$/, State: /^[A-Z]{2}$/, Amount: /^-?\d+\.\d{2}$/ };
+  const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  const MAX_ROWS = 200000;
+
+  const str = v => (v === undefined || v === null ? '' : String(v));
+  const ws = v => str(v).replace(/ /g, ' ').split(/\s+/).filter(Boolean).join(' ');
+  // Python str.title(): a letter is upper-cased when the previous character is not a letter, otherwise lower-cased.
+  const title = s => { let out = '', prev = false; for (const ch of s) { const isL = /\p{L}/u.test(ch); out += isL ? (prev ? ch.toLowerCase() : ch.toUpperCase()) : ch; prev = isL || /\p{M}/u.test(ch) && prev; } return out; };
+  const nameKey = v => ws(v).toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '');
+  const mailboxKey = email => { const at = email.indexOf('@'); if (at < 0) return email; const local = email.slice(0, at), domain = email.slice(at + 1);
+    return domain === 'gmail.com' || domain === 'googlemail.com' ? local.split('+')[0].replace(/\./g, '') + '@gmail.com' : email; };
+  const normEmail = v => ws(v).toLowerCase();
+  const normPhone = v => { let d = str(v).replace(/\D/g, ''); if (d.length === 11 && d[0] === '1') d = d.slice(1); return d.length === 10 ? '+1' + d : null; };
+  const normState = v => { const s = ws(v); return CODES.has(s.toUpperCase()) ? s.toUpperCase() : (STATES[s.toLowerCase()] || null); };
+  const normAmount = v => { let s = ws(v).replace(/\$/g, '').replace(/,/g, ''); const neg = s.startsWith('(') && s.endsWith(')'); s = s.replace(/^\(+|\)+$/g, '');
+    if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s.trim())) return null; const x = parseFloat(s); if (!isFinite(x)) return null; return (neg ? -Math.abs(x) : x).toFixed(2).replace(/^-0\.00$/, '-0.00'); };
+  const neutralise = v => { const s = ws(v); return '=+-@'.includes(s.slice(0, 1)) && s && !NUM.test(s) ? "'" + s : s; };
+  const SLASH = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+  const iso = (y, m, d) => { const dt = new Date(Date.UTC(y, m - 1, d)); if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null; return String(y).padStart(4, '0') + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0'); };
+  function dateConvention(values) { const votes = {}; for (const v of values) { const m = ws(v).match(SLASH); if (!m) continue; const a = +m[1], b = +m[2];
+      if (a > 12 && b <= 12) votes.DMY = (votes.DMY || 0) + 1; else if (b > 12 && a <= 12) votes.MDY = (votes.MDY || 0) + 1; }
+    return [(votes.DMY || 0) > (votes.MDY || 0) ? 'DMY' : 'MDY', votes]; }
+  function monthOf(t, full) { const x = t.toLowerCase(), i = full ? MONTHS.indexOf(x) : MONTHS.findIndex(m => m.slice(0, 3) === x); return i < 0 ? null : i + 1; }
+  function normDate(v, convention) { const s = ws(v); let m = s.match(SLASH);
+    if (m) { const a = +m[1], b = +m[2], y = +m[3], amb = a <= 12 && b <= 12 && a !== b; let mo, d;
+      if (a > 12) { mo = b; d = a; } else if (b > 12) { mo = a; d = b; } else if (convention === 'MDY') { mo = a; d = b; } else { mo = b; d = a; }
+      const r = iso(y, mo, d); return r ? [r, amb] : [null, false]; }
+    if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) { const r = iso(+m[1], +m[2], +m[3]); return [r, false]; }
+    for (const [re, order] of [[/^([A-Za-z]+) (\d{1,2}), (\d{4})$/, 'MDY'], [/^(\d{1,2}) ([A-Za-z]+) (\d{4})$/, 'DMY']]) {
+      if ((m = s.match(re))) { const [mt, dd] = order === 'MDY' ? [m[1], m[2]] : [m[2], m[1]]; const mo = monthOf(mt, true) || monthOf(mt, false); if (mo) { const r = iso(+m[3], mo, +dd); if (r) return [r, false]; } } }
+    return [null, false]; }
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+  function resolve(rows) {
+    const [convention, votes] = dateConvention(rows.map(r => r['Signup Date']));
+    const usable = [], exceptions = [], changes = [];
+    rows.forEach((r, k) => { const i = k + 2, email = normEmail(r.Email);
+      if (!email) { exceptions.push({ input_row: i, reason: 'missing_email (row not used; nothing invented)' }); return; }
+      const [date, amb] = normDate(r['Signup Date'], convention);
+      const n = { Name: title(ws(r.Name)), Email: email, Phone: normPhone(r.Phone), Company: neutralise(r.Company), 'Signup Date': date, State: normState(r.State), Amount: normAmount(r.Amount) };
+      if (n.Phone === null && !ws(r.Phone)) n.Phone = '';
+      // Optional fields that are simply absent stay blank (a product must accept Name/Email/Phone-only exports); only a present but
+      // unparseable value is an exception.
+      for (const f of ['Signup Date', 'State', 'Amount']) if (n[f] === null && !ws(r[f])) n[f] = '';
+      const bad = ['Phone', 'Signup Date', 'State', 'Amount'].filter(f => n[f] === null);
+      if (bad.length) { exceptions.push({ input_row: i, reason: 'unparseable:' + bad.join(',') }); return; }
+      for (const f of COLUMNS) if (str(r[f]) !== n[f]) changes.push({ input_row: i, field: f, before: str(r[f]), after: n[f] });
+      usable.push({ row: i, n, amb, nameKey: nameKey(n.Name) }); });
+    const parent = new Map(), find = x => { if (!parent.has(x)) parent.set(x, x); while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); } return x; };
+    const union = (a, b) => parent.set(find(a), find(b)), why = new Map(), byEmail = new Map(), byPhoneName = new Map();
+    for (const u of usable) { find(u.row);
+      const keys = [[u.n.Email, byEmail, 'same_email'], [mailboxKey(u.n.Email), byEmail, 'same_gmail_mailbox']];
+      if (u.n.Phone) keys.push([u.n.Phone + '\u0000' + u.nameKey, byPhoneName, 'same_phone_and_name']);
+      for (const [key, idx, reason] of keys) { if (idx.has(key)) { if (find(u.row) !== find(idx.get(key))) why.set(u.row, [idx.get(key), reason]); union(u.row, idx.get(key)); } else idx.set(key, u.row); } }
+    let clusters = new Map(); for (const u of usable) { const k = find(u.row); if (!clusters.has(k)) clusters.set(k, []); clusters.get(k).push(u); }
+    // Shared-inbox guard: an email used by two different people (different phones, each with an email of their own) is split.
+    for (const [root, members] of [...clusters]) { const byPhone = new Map(); for (const m of members) if (m.n.Phone) { if (!byPhone.has(m.n.Phone)) byPhone.set(m.n.Phone, []); byPhone.get(m.n.Phone).push(m); }
+      if (byPhone.size < 2) continue;
+      const emailsOf = new Map([...byPhone].map(([ph, ms]) => [ph, new Set(ms.map(m => m.n.Email))]));
+      const shared = new Set(); for (const es of emailsOf.values()) for (const e of es) if ([...emailsOf.values()].filter(o => o.has(e)).length > 1) shared.add(e);
+      if (!shared.size || ![...emailsOf.values()].every(es => [...es].some(e => !shared.has(e)))) continue;
+      clusters.delete(root);
+      for (const [ph, ms] of byPhone) { const keep = ms.filter(m => !shared.has(m.n.Email));
+        for (const m of ms) if (shared.has(m.n.Email)) { exceptions.push({ input_row: m.row, reason: 'needs_review: email shared by different people (different phones)' }); why.delete(m.row); }
+        if (keep.length) clusters.set('split|' + root + '|' + ph, keep); } }
+    const out = [], merges = [], conflicts = [];
+    for (const members of [...clusters.values()].sort((a, b) => a[0].row - b[0].row)) { const rec = {};
+      for (const f of COLUMNS) { const counts = new Map(); for (const m of members) counts.set(m.n[f], (counts.get(m.n[f]) || 0) + 1);
+        let top = [...counts].sort((a, b) => b[1] - a[1]);
+        top.sort((a, b) => ((a[0] === '') - (b[0] === '')) || (b[1] - a[1]) || (a[0].startsWith("'") - b[0].startsWith("'")));
+        if (f === 'Name' && new Set(top.filter(([v]) => v).map(([v]) => nameKey(v))).size === 1) {
+          const hi = v => [...v].filter(ch => ch.codePointAt(0) > 127).length;
+          top.sort((a, b) => ((a[0] === '') - (b[0] === '')) || (hi(b[0]) - hi(a[0])) || (b[1] - a[1])); }
+        rec[f] = top[0][0];
+        if (counts.size > 1 && f !== 'Name') conflicts.push({ contact_email: null, field: f, values: Object.fromEntries(counts), chosen: rec[f] }); }
+      for (const c of conflicts) if (c.contact_email === null) c.contact_email = rec.Email;
+      for (const m of members.slice(1)) { const [src, reason] = why.get(m.row) || [members[0].row, 'transitive'];
+        merges.push({ merged_input_row: m.row, into_contact: rec.Email, matched_input_row: src, evidence: reason }); }
+      out.push(rec); }
+    return { out, exceptions, changes, merges, conflicts, dates: { convention, votes, ambiguous_dates: usable.filter(u => u.amb).length } };
+  }
+  function selfCheck(out, inputRows, exceptions, merges) { const p = [];
+    for (const r of out) { for (const [f, rx] of Object.entries(CHECKS)) { if (f !== 'Email' && r[f] === '') continue; if (!rx.test(r[f])) p.push(f + ':' + JSON.stringify(r[f])); }
+      if ('=+-@'.includes(r.Company.slice(0, 1)) && r.Company && !NUM.test(r.Company)) p.push('unsafe_company'); }
+    if (inputRows !== out.length + exceptions.length + merges.length) p.push('reconciliation');
+    if (new Set(out.map(r => r.Email)).size !== out.length) p.push('duplicate_email_in_output');
+    return p; }
+
+  // RFC 4180 CSV (quotes, escaped quotes, embedded newlines, CRLF, BOM).
+  function parseCSV(text) { text = str(text).replace(/^﻿/, ''); const rows = []; let row = [], field = '', q = false;
+    for (let i = 0; i < text.length; i++) { const c = text[i];
+      if (q) { if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else q = false; } else field += c; continue; }
+      if (c === '"' && field === '') q = true; else if (c === ',') { row.push(field); field = ''; } else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(field); rows.push(row); row = []; field = ''; } else field += c; }
+    if (q) throw new Error('MALFORMED_CSV: unterminated quote');
+    if (field !== '' || row.length) { row.push(field); rows.push(row); }
+    while (rows.length && rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === '') rows.pop();
+    if (!rows.length) return { header: [], records: [] };
+    const header = rows[0]; return { header, records: rows.slice(1).map(r => Object.fromEntries(header.map((h, k) => [h, r[k] === undefined ? '' : r[k]]))) }; }
+  const cell = v => { const s = str(v); return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const toCSV = (fields, data) => [fields.map(cell).join(','), ...data.map(r => fields.map(f => cell(r[f])).join(','))].join('\r\n') + '\r\n';
+  const pyJson = o => '{' + Object.entries(o).map(([k, v]) => JSON.stringify(k) + ': ' + JSON.stringify(v)).join(', ') + '}';
+
+  /** Run on CSV text. Returns the deliverable files as strings plus the report; throws (fail closed) when it cannot vouch for the result. */
+  function run(csvText) {
+    const { header, records } = parseCSV(csvText);
+    if (records.length > MAX_ROWS) throw new Error('TOO_LARGE: ' + records.length + ' rows (limit ' + MAX_ROWS + ')');
+    const missing = ['Name', 'Email', 'Phone'].filter(c => records.length && !header.includes(c));
+    if (missing.length) throw new Error('SELF_CHECK_FAILED: missing required columns ' + missing.join(','));
+    const { out, exceptions, changes, merges, conflicts, dates } = resolve(records);
+    const problems = selfCheck(out, records.length, exceptions, merges);
+    if (problems.length) throw new Error('SELF_CHECK_FAILED: ' + problems.slice(0, 10).join('; '));
+    const extra = header.filter(h => !COLUMNS.includes(h));
+    const evidence = {}; for (const m of merges) evidence[m.evidence] = (evidence[m.evidence] || 0) + 1;
+    const report = { input_rows: records.length, output_contacts: out.length, merged_rows: merges.length, exception_rows: exceptions.length,
+      reconciled: records.length === out.length + merges.length + exceptions.length, merge_evidence: evidence, date_convention: dates, field_conflicts: conflicts.length, extra_columns_not_carried: extra, self_check: 'PASS' };
+    return { report, files: {
+      'cleaned.csv': toCSV(COLUMNS, out), 'exceptions.csv': toCSV(['input_row', 'reason'], exceptions), 'change_log.csv': toCSV(['input_row', 'field', 'before', 'after'], changes),
+      'merge_log.csv': toCSV(['merged_input_row', 'into_contact', 'matched_input_row', 'evidence'], merges),
+      'field_conflicts.csv': toCSV(['contact_email', 'field', 'values', 'chosen'], conflicts.map(c => ({ ...c, values: pyJson(c.values) }))),
+      'validation_report.json': JSON.stringify(report, null, 2) + '\n' } };
+  }
+  return { run, resolve, parseCSV, toCSV, COLUMNS, _internal: { ws, title, nameKey, mailboxKey, normPhone, normState, normAmount, normDate, neutralise } };
+});
+
+(function(){
+ const drop=document.getElementById('drop'),input=document.getElementById('file'),status=document.getElementById('status');
+ const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+ function download(name,text){const b=new Blob([text],{type:name.endsWith('.json')?'application/json':'text/csv'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download=name;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},0);}
+ function show(file,text){status.hidden=false;let r;
+  try{r=ListMerge.run(text);}catch(e){status.innerHTML='<p class="err"><strong>Could not process '+esc(file.name)+':</strong> '+esc(e.message)+'</p><p class="note">Nothing was produced. Check the file has a header row with Name, Email and Phone columns and is saved as CSV.</p>';return;}
+  const p=r.report,ev=Object.entries(p.merge_evidence).map(([k,v])=>esc(k.replace(/_/g,' '))+': '+v).join(', ')||'none';
+  status.innerHTML='<p class="ok"><strong>'+esc(file.name)+'</strong>: done, every row accounted for.</p>'+
+   '<div class="stats"><div class="stat"><b>'+p.input_rows+'</b><span>rows in</span></div><div class="stat"><b>'+p.output_contacts+'</b><span>contacts out</span></div><div class="stat"><b>'+p.merged_rows+'</b><span>rows merged</span></div><div class="stat"><b>'+p.exception_rows+'</b><span>for your review</span></div></div>'+
+   '<p class="note">Merge evidence: '+ev+'. Dates read as '+esc(p.date_convention.convention)+' ('+p.date_convention.ambiguous_dates+' ambiguous resolved that way).'+(p.extra_columns_not_carried.length?' <strong>Not carried into the cleaned file:</strong> '+esc(p.extra_columns_not_carried.join(', '))+'.':'')+'</p>'+
+   '<p>'+Object.keys(r.files).map(n=>'<button data-f="'+esc(n)+'">'+esc(n)+'</button>').join('')+'</p>';
+  status.querySelectorAll('button').forEach(b=>b.onclick=()=>download(b.dataset.f,r.files[b.dataset.f]));}
+ function handle(f){if(!f)return;if(f.size>200*1024*1024){status.hidden=false;status.innerHTML='<p class="err">File too large (limit 200 MB).</p>';return;}const fr=new FileReader();fr.onload=()=>show(f,fr.result);fr.readAsText(f);}
+ const SAMPLE='Name,Email,Phone,Company,Signup Date,State,Amount\nAva Brooks,ava.brooks@gmail.com,(314) 555-0101,Lumen Fitness,03/05/2024,Missouri,"$1,200.50"\nAVA BROOKS,avabrooks+news@gmail.com,,Lumen Fitness,2024-03-05,MO,1200.50\nJosé Ortiz,jose@oak.example.com,3145550111,Oak & Iron,03/25/2024,TX,(10.00)\nJose Ortiz,j.ortiz@outlook.example.com,314-555-0111,Oak & Iron,2024-03-26,tx,-10\nAva Brooks,ava@other.example.com,314.555.0199,Gateway Realty,03/06/2024,MO,75\nNia Hayes,info@riverbend.example.com,3145550120,Riverbend CPA,2024-04-01,IL,10\nNia Hayes,nia@riverbend.example.com,3145550120,=HYPERLINK("x"),2024-04-01,IL,10\nOwen Reed,info@riverbend.example.com,3145550130,Riverbend CPA,2024-04-02,IL,5\nOwen Reed,owen@riverbend.example.com,3145550130,Riverbend CPA,2024-04-02,IL,5\nSam Lee,,3145550140,Brightpath Tutoring,2024-05-01,OH,20\n';
+ document.getElementById('sample').onclick=()=>show({name:'sample-contacts.csv'},SAMPLE);
+ if(true)show({name:'sample-contacts.csv'},SAMPLE);
+ if(drop&&input){drop.onclick=()=>input.click();drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')input.click();};input.onchange=()=>handle(input.files[0]);
+ drop.ondragover=e=>{e.preventDefault();drop.classList.add('over');};drop.ondragleave=()=>drop.classList.remove('over');
+ drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');handle(e.dataTransfer.files[0]);};}
+})();
+</script>
+</body>
+</html>
