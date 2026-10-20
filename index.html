@@ -68,6 +68,17 @@
     <p class="note">Synthetic demo (made-up data, not client work): a 270-row contact export reduced to 172 contacts. 88 rows were merged (59 on the same email, 21 on the same phone and name, 8 on the same Gmail inbox) and 10 rows were set aside with reasons. Every row reconciles.</p>
   </div>
 
+  <h2>Bank statement PDFs to reconciled spreadsheets (new, not on sale yet)</h2>
+  <div class="panel">
+    <p>StatementProof turns a text-based bank statement PDF into <code>transactions.csv</code>, a QuickBooks bank-upload CSV and a Xero statement-import CSV, and proves the result.</p>
+    <ul>
+      <li><strong>Every running balance checked to the cent:</strong> opening balance plus all transactions must equal the closing balance.</li>
+      <li><strong>Refuses instead of guessing:</strong> a statement that does not add up names the row and page that break; scans, password-protected files and unsupported layouts get a clear reason.</li>
+      <li><strong>Runs in your browser:</strong> the statement is never uploaded.</li>
+    </ul>
+    <p class="note"><a href="statementproof/">See it convert a synthetic statement live in your browser</a> (made-up data; nothing is uploaded). Interested in using it? Send a message through Contra.</p>
+  </div>
+
   <h2>Sample work</h2>
   <p class="note">These samples use <strong>synthetic data, not client work</strong>. They show the real output of the cleanup tool on a made-up 10-row ad-spend export.</p>
   <div class="grid">
